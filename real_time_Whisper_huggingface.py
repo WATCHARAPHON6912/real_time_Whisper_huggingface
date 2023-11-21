@@ -89,7 +89,7 @@ async def process_audio_buffer():
             
 			x= pre(indata_transformed)
 			time_end = datetime.now()
-			print(f"end {time_end}\ntotal {time_end-time_start}")
+			print(f"end {time_end}\ntime {time_end-time_start}")
 			print(x)
 			
             
