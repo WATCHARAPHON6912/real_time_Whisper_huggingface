@@ -1,23 +1,21 @@
-import sounddevice as sd
 import numpy as np
-from datetime import datetime
-
-# import whisper
-
-import asyncio
-# import queue
-import sys
-
-# import os
+import pyaudio
+import matplotlib.pyplot as plt
 import torch
 from transformers import pipeline
+import thaispellcheck
 
-MODEL_NAME = "biodatlab/whisper-th-medium-combined"
-# MODEL_NAME = "biodatlab/whisper-th-large-combined"
-lang = "th"
+# การตั้งค่าพารามิเตอร์สำหรับการบันทึกเสียง
+CHUNK = 1024 * 5
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+THRESHOLD = 30
+SILENCE_DURATION = 2
 
+# การตั้งค่าโมเดล Whisper สำหรับการถอดเสียง
+MODEL_NAME = "whisper-th-medium-Xi"
 device = 0 if torch.cuda.is_available() else "cpu"
-# device = "cpu"
 print(device)
 pipe = pipeline(
     task="automatic-speech-recognition",
@@ -25,93 +23,67 @@ pipe = pipeline(
     chunk_length_s=30,
     device=device,
 )
+
+# ฟังก์ชันสำหรับการถอดเสียง
 def pre(audio):
-    return pipe(audio,batch_size=16,return_timestamps=False,generate_kwargs={"language": "<|th|>", "task": "transcribe"})["text"]
+    return pipe(audio, batch_size=16, return_timestamps=False)["text"]
 
-# SETTINGS
-# MODEL_TYPE="base"
-# the model used for transcription. https://github.com/openai/whisper#available-models-and-languages
-# LANGUAGE="Thai"
-# pre-set the language to avoid autodetection
-BLOCKSIZE=24678 
-# this is the base chunk size the audio is split into in samples. blocksize / 16000 = chunk length in seconds. 
-SILENCE_THRESHOLD=400
-# should be set to the lowest sample amplitude that the speech in the audio material has
-SILENCE_RATIO=100
-# number of samples in one buffer that are allowed to be higher than threshold
+# ฟังก์ชันสำหรับการจับเสียงและแสดงกราฟแบบเรียลไทม์
+def audio_capture(show_plot=False):
+    p = pyaudio.PyAudio()
+    stream = p.open(format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK)
 
+    if show_plot:
+        # สร้างกราฟ
+        plt.ion()
+        fig, ax = plt.subplots()
+        x = np.arange(0, 4 * CHUNK, 2)
+        line, = ax.plot(x, np.random.rand(2 * CHUNK))
+        ax.set_ylim(-3000, 3000)
+        ax.set_xlim(0, 4 * CHUNK)
+        plt.show()
 
-global_ndarray = None
-# model = whisper.load_model(MODEL_TYPE)
+    try:
+        while True:
+            silence_counter = 0
+            detect = False
+            frames = []
+            while True:
+                # อ่านข้อมูลจาก stream
+                data = stream.read(CHUNK)
+                np_data = np.frombuffer(data, dtype=np.int16)
+                frames.append(data)
 
-async def inputstream_generator():
-	"""Generator that yields blocks of input data as NumPy arrays."""
-	q_in = asyncio.Queue()
-	loop = asyncio.get_event_loop()
+                if show_plot:
+                    # อัปเดตกราฟแบบเรียลไทม์
+                    data_plot = np.concatenate((line.get_ydata()[CHUNK:], np_data))
+                    line.set_ydata(data_plot)
+                    fig.canvas.draw()
+                    fig.canvas.flush_events()
 
-	def callback(indata, frame_count, time_info, status):
-		loop.call_soon_threadsafe(q_in.put_nowait, (indata.copy(), status))
+                # ตรวจสอบว่ามีการพูดหรือไม่
+                if np.abs(np_data).mean() > THRESHOLD:
+                    print("ตรวจพบการพูด...")
+                    detect = True
+                    silence_counter = 0
+                else:
+                    silence_counter += 1
 
-	stream = sd.InputStream(samplerate=16000, channels=1, dtype='int16', blocksize=BLOCKSIZE, callback=callback)
-	with stream:
-		while True:
-			indata, status = await q_in.get()
-			yield indata, status
-			
-		
-async def process_audio_buffer():
-	global global_ndarray
-	async for indata, status in inputstream_generator():
-		
-		indata_flattened = abs(indata.flatten())
-				
-		# discard buffers that contain mostly silence
-		if(np.asarray(np.where(indata_flattened > SILENCE_THRESHOLD)).size < SILENCE_RATIO):
-			continue
-		
-		if (global_ndarray is not None):
-			global_ndarray = np.concatenate((global_ndarray, indata), dtype='int16')
-		else:
-			global_ndarray = indata
-			
-		# concatenate buffers if the end of the current buffer is not silent
-		if (np.average((indata_flattened[-100:-1])) > SILENCE_THRESHOLD/15):
-			continue
-		else:
-			time_start = datetime.now()
-			print(f"Start :{time_start}")
-			local_ndarray = global_ndarray.copy()
-			global_ndarray = None
-			indata_transformed = local_ndarray.flatten().astype(np.float32) / 32768.0
-			# print(indata_transformed)
-			# result = model.transcribe(indata_transformed, language=LANGUAGE)
-			# print(result["text"])
-            
-			x= pre(indata_transformed)
-			time_end = datetime.now()
-			print(f"end {time_end}\ntime {time_end-time_start}")
-			print(x)
-			
-            
-            
-		del local_ndarray
-		del indata_flattened
+                if silence_counter > int(SILENCE_DURATION * RATE / CHUNK) and detect:
+                    print("กำลังประมวลผลเสียง")
+                    yield b''.join(frames)
+                    break
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
 
+# ใช้ฟังก์ชัน audio_capture และ pre สำหรับการจับเสียงและถอดเสียง
+for frame in audio_capture(show_plot=True):  # เปลี่ยนเป็น False หากไม่ต้องการแสดงกราฟ
+    audio_data = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
+    print(thaispellcheck.check(pre(audio_data),autocorrect=True))
 
-async def main():
-	print('\nActivating wire ...\n')
-	audio_task = asyncio.create_task(process_audio_buffer())
-	while True:
-		await asyncio.sleep(0)
-	audio_task.cancel()
-	try:
-		await audio_task
-	except asyncio.CancelledError:
-		print('\nwire was cancelled')
-
-
-if __name__ == "__main__":
-	try:
-		asyncio.run(main())
-	except KeyboardInterrupt:
-		sys.exit('\nInterrupted by user')
